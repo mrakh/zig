@@ -247,18 +247,34 @@ pub const Random = struct {
 
     /// Return a floating point value evenly distributed in the range [0, 1).
     pub fn float(r: Random, comptime T: type) T {
-        // Generate a uniform value between [1, 2) and scale down to [0, 1).
-        // Note: The lowest mantissa bit is always set to 0 so we only use half the available range.
+        // Generate a uniformly random value between for the mantissa.
+        // Then generate an exponentially biased random value for the exponent.
+        // Over the previous method, this has the advantage of being able to represent
+        // much more of the available range.
         switch (T) {
             f32 => {
-                const s = r.int(u32);
-                const repr = (0x7f << 23) | (s >> 9);
-                return @bitCast(f32, repr) - 1.0;
+                // Use the lowest 23 bits for the mantissa, and use the rest to calculate
+                // the exponent. Using only 41 bits for calculating the exponent instead
+                // of the full 128 means that the minimum generatable value is 2^-42, but
+                // it minimizes entropy waste and avoids branching.
+                const rand = r.int(u64);
+                const rand_lz = @clz(u64, rand | 0x7FFFFF);
+                const mantissa = @truncate(u32, rand & 0x7FFFFF);
+                const exponent = @as(u32, 126 - rand_lz) << 23; 
+                return @bitCast(f32, exponent | mantissa);
             },
             f64 => {
-                const s = r.int(u64);
-                const repr = (0x3ff << 52) | (s >> 12);
-                return @bitCast(f64, repr) - 1.0;
+                // Use the lowest 52 bits for the mantissa, and use the rest to calculate
+                // the exponent. If all 12 exponent bits are zero, we fetch 64 more bits
+                // of entropy. This means that the minimum generatable value is 2^-(12+64+1).
+                const rand = r.int(u64);
+                var rand_lz = @clz(u64, rand | 0xFFFFFFFFFFFFF);
+                if(rand_lz == 12) {
+                    rand_lz += @clz(u64, r.int(u64));
+                }
+                const mantissa = rand & 0xFFFFFFFFFFFFF;
+                const exponent = (1022 - @as(u64, rand_lz)) << 52;
+                return @bitCast(f64, exponent | mantissa);
             },
             else => @compileError("unknown floating point type"),
         }
